@@ -27,15 +27,34 @@ static uint32_t s_indexCount = 0;
 
 // Ресурсы Uniform Buffer и Descriptors
 struct GlobalUniforms {
-    alignas(16) float mvp[16];
+    alignas(16) float mvp[16];          
+    alignas(16) float model[16];        
+    alignas(16) float ambientLight[4];  // Сначала ambient
+    alignas(16) float lightColor[4];    // Потом цвет
+    alignas(16) float lightDir[4];      // Потом направление
+    alignas(16) float cameraPos[4];     // Потом камера
+	alignas(16) float specularColor[4]; // Цвет блика
+    float shininess;                    
+    float pad1, pad2, pad3;             
 };
 static VkBuffer s_uniformBuffer = VK_NULL_HANDLE;
 static VmaAllocation s_uniformAlloc = {};
 static void* s_uniformBufferMapped = nullptr; // Отображенная память UBO
 
+// второй UBO для пола
+static VkBuffer s_uniformBufferFloor = VK_NULL_HANDLE;
+static VmaAllocation s_uniformAllocFloor = {};
+static void* s_uniformBufferMappedFloor = nullptr;
+
 static VkDescriptorSetLayout s_descriptorSetLayout = VK_NULL_HANDLE;
 static VkDescriptorPool s_descriptorPool = VK_NULL_HANDLE;
-static VkDescriptorSet s_descriptorSet = VK_NULL_HANDLE;
+static VkDescriptorSet s_descriptorSet = VK_NULL_HANDLE;      // для куба
+static VkDescriptorSet s_descriptorSetFloor = VK_NULL_HANDLE; // для пола
+
+// границы индексов
+static uint32_t s_cubeIndexCount   = 0;
+static uint32_t s_floorIndexOffset = 0;
+static uint32_t s_floorIndexCount  = 0;
 
 static VkPipeline s_pipeline = VK_NULL_HANDLE; // конвейер
 static VkPipelineLayout s_pipelineLayout = VK_NULL_HANDLE; // макет конвейера
@@ -46,6 +65,15 @@ static VkShaderModule s_fragModule = VK_NULL_HANDLE; // фрагментный �
 static bool s_usePerspective = true; // смена вида
 static float s_rotation[3] = {0.0f, 0.0f, 0.0f}; // поворот куба
 static bool s_autoRotate = false; // автовращение
+// lab2
+static float s_camPos[3] = {0.0f, 0.0f, 3.5f};
+static float s_lightDir[3] = {0.0f, -1.0f, -1.0f};
+static float s_lightColor[3] = {1.0f, 1.0f, 1.0f};
+static float s_ambientLight[3] = {0.2f, 0.2f, 0.2f};
+static float s_shininess = 32.0f;
+static float s_camRot[3] = {0.0f, 0.0f, 0.0f}; // Поворот камеры (Pitch, Yaw, Roll)
+static float s_fov = 45.0f;                    // Угол обзора (FOV)
+static float s_specularColor[3] = {1.0f, 1.0f, 1.0f}; // Цвет блика (Ks)
 
 bool initialize() {
 	using namespace graphics::internal;
@@ -85,31 +113,125 @@ bool initialize() {
 	if (!createShaderModule("shaders/cube.vert.spv", s_vertModule)) return false;
 	if (!createShaderModule("shaders/cube.frag.spv", s_fragModule)) return false;
 
-	// ЗАДАЕМ КУБ
-	struct Vertex { float pos[3]; float color[3]; }; // позиция + цвет
-
-	const std::vector<Vertex> vertices = {
-		// Передние вершины
-		{{-0.5f, -0.5f,  0.5f}, {1.0f, 0.0f, 0.0f}},
-		{{ 0.5f, -0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}},
-		{{ 0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}},
-		{{-0.5f,  0.5f,  0.5f}, {1.0f, 1.0f, 0.0f}},
-		// Задние вершины
-		{{-0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 1.0f}},
-		{{ 0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 1.0f}},
-		{{ 0.5f,  0.5f, -0.5f}, {1.0f, 1.0f, 1.0f}},
-		{{-0.5f,  0.5f, -0.5f}, {0.2f, 0.2f, 0.2f}},
+	// ЗАДАЕМ КУБ (позиция и цвет, нормали сгенерируем процедурно)
+	struct Vertex { 
+		float pos[3];    // Позиция
+		float normal[3]; // Нормаль (будет заполнена процедурно)
+		float color[3];  // Цвет / альбедо
 	};
 
-	// Грани (по 2 треугольника)
-	const std::vector<uint16_t> indices = {
-		0, 1, 2,  2, 3, 0, // передняя грань
-		1, 5, 6,  6, 2, 1, // правая
-		5, 4, 7,  7, 6, 5, // задняя
-		4, 0, 3,  3, 7, 4, // левая
-		3, 2, 6,  6, 7, 3, // верхняя
-		4, 5, 1,  1, 0, 4  // нижняя
+	std::vector<Vertex> vertices = {
+		// 1. Передняя грань
+		{{-0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+		{{ 0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+		{{ 0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+		{{-0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+
+		// 2. Задняя грань
+		{{ 0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+		{{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+		{{-0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+		{{ 0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+
+		// 3. Левая грань
+		{{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},
+		{{-0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},
+		{{-0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},
+		{{-0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},
+
+		// 4. Правая грань
+		{{ 0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 0.0f}},
+		{{ 0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 0.0f}},
+		{{ 0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 0.0f}},
+		{{ 0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 0.0f}},
+
+		// 5. Нижняя грань
+		{{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 1.0f}},
+		{{ 0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 1.0f}},
+		{{ 0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 1.0f}},
+		{{-0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 1.0f}},
+
+		// 6. Верхняя грань
+		{{-0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 1.0f}},
+		{{ 0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 1.0f}},
+		{{ 0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 1.0f}},
+		{{-0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 1.0f}},
 	};
+
+	// Индексы для 6 граней (36 индексов)[cite: 1]
+	std::vector<uint16_t> indices = {
+		0,  1,  2,   2,  3,  0,   // Передняя
+		4,  5,  6,   6,  7,  4,   // Задняя
+		8,  9,  10,  10, 11, 8,   // Левая
+		12, 13, 14,  14, 15, 12,  // Правая
+		16, 17, 18,  18, 19, 16,  // Нижняя
+		20, 21, 22,  22, 23, 20    // Верхняя
+	};
+
+	// ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ НОРМАЛЕЙ
+	for (size_t i = 0; i < indices.size(); i += 3) {
+		uint16_t idx0 = indices[i + 0];
+		uint16_t idx1 = indices[i + 1];
+		uint16_t idx2 = indices[i + 2];
+
+		Vertex& v0 = vertices[idx0];
+		Vertex& v1 = vertices[idx1];
+		Vertex& v2 = vertices[idx2];
+
+		// Вычисляем векторы ребер треугольника
+		float edge1[3] = {
+			v1.pos[0] - v0.pos[0],
+			v1.pos[1] - v0.pos[1],
+			v1.pos[2] - v0.pos[2]
+		};
+		float edge2[3] = {
+			v2.pos[0] - v0.pos[0],
+			v2.pos[1] - v0.pos[1],
+			v2.pos[2] - v0.pos[2]
+		};
+
+		// Векторное произведение (edge1 x edge2) для получения нормали грани
+		float normal[3] = {
+			edge1[1] * edge2[2] - edge1[2] * edge2[1],
+			edge1[2] * edge2[0] - edge1[0] * edge2[2],
+			edge1[0] * edge2[1] - edge1[1] * edge2[0]
+		};
+
+		// Аккумулируем нормали к вершинам треугольника
+		for (int j = 0; j < 3; ++j) {
+			v0.normal[j] += normal[j];
+			v1.normal[j] += normal[j];
+			v2.normal[j] += normal[j];
+		}
+	}
+
+	// Нормализуем полученные векторы нормалей для каждой вершины
+	for (auto& v : vertices) {
+		float length = std::sqrt(v.normal[0] * v.normal[0] + v.normal[1] * v.normal[1] + v.normal[2] * v.normal[2]);
+		if (length > 0.0f) {
+			v.normal[0] /= length;
+			v.normal[1] /= length;
+			v.normal[2] /= length;
+		}
+	}
+
+	// ПОЛ
+	const float floorY = -1.0f;
+	const float floorS = 2.0f;
+	std::vector<Vertex> floorVerts = {
+		{{-floorS, floorY, -floorS}, {0.0f, 1.0f, 0.0f}, {0.35f, 0.35f, 0.35f}},
+		{{ floorS, floorY, -floorS}, {0.0f, 1.0f, 0.0f}, {0.35f, 0.35f, 0.35f}},
+		{{ floorS, floorY,  floorS}, {0.0f, 1.0f, 0.0f}, {0.35f, 0.35f, 0.35f}},
+		{{-floorS, floorY,  floorS}, {0.0f, 1.0f, 0.0f}, {0.35f, 0.35f, 0.35f}},
+	};
+	std::vector<uint16_t> floorIndices = {0, 2, 1,  3, 2, 0};
+	s_cubeIndexCount   = (uint32_t)indices.size();
+	s_floorIndexOffset = (uint32_t)indices.size();
+	s_floorIndexCount  = (uint32_t)floorIndices.size();
+
+	uint16_t floorBase = (uint16_t)vertices.size();
+	for (auto& v : floorVerts) vertices.push_back(v);
+	for (auto  i : floorIndices) indices.push_back(i + floorBase);
 
 	// Создаем буфер вершин
 	VkBufferCreateInfo vbInfo{};
@@ -160,13 +282,19 @@ bool initialize() {
 		return false;
 	}
 	s_uniformBufferMapped = resultAllocInfo.pMappedData;
+	// ПОЛ
+	VmaAllocationInfo resultAllocInfoFloor{};
+	if (vmaCreateBuffer(ctx.allocator, &uboInfo, &uboAllocInfo, &s_uniformBufferFloor, &s_uniformAllocFloor, &resultAllocInfoFloor) != VK_SUCCESS) {
+		return false;
+	}
+	s_uniformBufferMappedFloor = resultAllocInfoFloor.pMappedData;
 
 	// Создаем Descriptor Set Layout
 	VkDescriptorSetLayoutBinding uboLayoutBinding{};
 	uboLayoutBinding.binding = 0;
 	uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	uboLayoutBinding.descriptorCount = 1;
-	uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 	VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
 	layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -180,13 +308,13 @@ bool initialize() {
 	// Создаем Descriptor Pool и выделяем Descriptor Set
 	VkDescriptorPoolSize poolSize{};
 	poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	poolSize.descriptorCount = 1;
+	poolSize.descriptorCount = 2;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	poolInfo.poolSizeCount = 1;
 	poolInfo.pPoolSizes = &poolSize;
-	poolInfo.maxSets = 1;
+	poolInfo.maxSets = 2;
 
 	if (vkCreateDescriptorPool(ctx.device, &poolInfo, nullptr, &s_descriptorPool) != VK_SUCCESS) {
 		return false;
@@ -195,29 +323,44 @@ bool initialize() {
 	VkDescriptorSetAllocateInfo allocSetInfo{};
 	allocSetInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
 	allocSetInfo.descriptorPool = s_descriptorPool;
-	allocSetInfo.descriptorSetCount = 1;
-	allocSetInfo.pSetLayouts = &s_descriptorSetLayout;
+	allocSetInfo.descriptorSetCount = 2;
+	VkDescriptorSetLayout layouts[2] = { s_descriptorSetLayout, s_descriptorSetLayout };
+	allocSetInfo.pSetLayouts = layouts;
 
-	if (vkAllocateDescriptorSets(ctx.device, &allocSetInfo, &s_descriptorSet) != VK_SUCCESS) {
+	VkDescriptorSet sets[2];
+	if (vkAllocateDescriptorSets(ctx.device, &allocSetInfo, sets) != VK_SUCCESS) {
 		return false;
 	}
+	s_descriptorSet      = sets[0];
+	s_descriptorSetFloor = sets[1];
 
 	// Связываем Uniform Buffer с Descriptor Set
-	VkDescriptorBufferInfo bufferInfo{};
+		VkDescriptorBufferInfo bufferInfo{};
 	bufferInfo.buffer = s_uniformBuffer;
 	bufferInfo.offset = 0;
 	bufferInfo.range = sizeof(GlobalUniforms);
 
-	VkWriteDescriptorSet descriptorWrite{};
-	descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrite.dstSet = s_descriptorSet;
-	descriptorWrite.dstBinding = 0;
-	descriptorWrite.dstArrayElement = 0;
-	descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	descriptorWrite.descriptorCount = 1;
-	descriptorWrite.pBufferInfo = &bufferInfo;
+	VkDescriptorBufferInfo bufferInfoFloor{};
+	bufferInfoFloor.buffer = s_uniformBufferFloor;
+	bufferInfoFloor.offset = 0;
+	bufferInfoFloor.range = sizeof(GlobalUniforms);
 
-	vkUpdateDescriptorSets(ctx.device, 1, &descriptorWrite, 0, nullptr);
+	VkWriteDescriptorSet writes[2]{};
+	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[0].dstSet = s_descriptorSet;
+	writes[0].dstBinding = 0;
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	writes[0].descriptorCount = 1;
+	writes[0].pBufferInfo = &bufferInfo;
+
+	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[1].dstSet = s_descriptorSetFloor;
+	writes[1].dstBinding = 0;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	writes[1].descriptorCount = 1;
+	writes[1].pBufferInfo = &bufferInfoFloor;
+
+	vkUpdateDescriptorSets(ctx.device, 2, writes, 0, nullptr);
 
 	// Создаем Pipeline Layout с поддержкой DescriptorSetLayout
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
@@ -250,22 +393,31 @@ bool initialize() {
 	bindingDesc.stride = sizeof(Vertex);
 	bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-	VkVertexInputAttributeDescription attrDesc[2];
+	VkVertexInputAttributeDescription attrDesc[3]; // Теперь у нас 3 атрибута!
+	
+	// 1. Позиция (location = 0)
 	attrDesc[0].location = 0;
 	attrDesc[0].binding = 0;
 	attrDesc[0].format = VK_FORMAT_R32G32B32_SFLOAT;
 	attrDesc[0].offset = offsetof(Vertex, pos);
 
+	// 2. Нормаль (location = 1)
 	attrDesc[1].location = 1;
 	attrDesc[1].binding = 0;
 	attrDesc[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-	attrDesc[1].offset = offsetof(Vertex, color);
+	attrDesc[1].offset = offsetof(Vertex, normal);
+
+	// 3. Цвет / Альбедо (location = 2)
+	attrDesc[2].location = 2;
+	attrDesc[2].binding = 0;
+	attrDesc[2].format = VK_FORMAT_R32G32B32_SFLOAT;
+	attrDesc[2].offset = offsetof(Vertex, color);
 
 	VkPipelineVertexInputStateCreateInfo vertexInput{};
 	vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 	vertexInput.vertexBindingDescriptionCount = 1;
 	vertexInput.pVertexBindingDescriptions = &bindingDesc;
-	vertexInput.vertexAttributeDescriptionCount = 2;
+	vertexInput.vertexAttributeDescriptionCount = 3;
 	vertexInput.pVertexAttributeDescriptions = attrDesc;
 
 	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
@@ -335,6 +487,7 @@ void shutdown() {
 	if (s_descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(ctx.device, s_descriptorPool, nullptr);
 	if (s_descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(ctx.device, s_descriptorSetLayout, nullptr);
 	if (s_uniformBuffer != VK_NULL_HANDLE) vmaDestroyBuffer(ctx.allocator, s_uniformBuffer, s_uniformAlloc);
+	if (s_uniformBufferFloor != VK_NULL_HANDLE) vmaDestroyBuffer(ctx.allocator, s_uniformBufferFloor, s_uniformAllocFloor);
 
 	if (s_pipeline != VK_NULL_HANDLE) vkDestroyPipeline(ctx.device, s_pipeline, nullptr);
 	if (s_pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(ctx.device, s_pipelineLayout, nullptr);
@@ -346,7 +499,7 @@ void shutdown() {
 
 void update(double dt) {
     // Создаем свое окно
-    ImGui::Begin("Laba #1");
+    ImGui::Begin("Laba #2");
 
     // Смена проекции
     ImGui::RadioButton("Perspective projection", (int*)&s_usePerspective, 1);
@@ -359,6 +512,20 @@ void update(double dt) {
     if (!s_autoRotate) {
         ImGui::SliderFloat3("Rotate (X, Y, Z)", s_rotation, -180.0f, 180.0f);
     }
+
+	ImGui::Separator();
+    ImGui::Text("Camera Settings");
+    ImGui::SliderFloat3("Cam Pos", s_camPos, -3.0f, 3.0f);
+    ImGui::SliderFloat3("Cam Rot (Pitch, Yaw, Roll)", s_camRot, -180.0f, 180.0f);
+    ImGui::SliderFloat("FOV", &s_fov, 10.0f, 120.0f);
+
+    ImGui::Separator();
+    ImGui::Text("Lighting & Material");
+    ImGui::SliderFloat3("Light Dir", s_lightDir, -1.0f, 1.0f);
+    ImGui::ColorEdit3("Light Color", s_lightColor);
+    ImGui::ColorEdit3("Ambient Light", s_ambientLight);
+    ImGui::ColorEdit3("Specular Color (Ks)", s_specularColor);
+    ImGui::SliderFloat("Shininess", &s_shininess, 1.0f, 256.0f);
 
     ImGui::End();
 
@@ -391,13 +558,31 @@ void render(const graphics::internal::FrameData& fd) {
 		0.0f,                     0.0f,                     0.0f,    1.0f
 	};
 
-	// Матрица View (камера)
+	float camPitch = s_camRot[0] * 3.14159265f / 180.0f;
+	float camYaw   = s_camRot[1] * 3.14159265f / 180.0f;
+	float camRoll  = s_camRot[2] * 3.14159265f / 180.0f;
+	
+	// Формирование матриц поворота камеры вокруг осей X и Y
+	float cp = std::cos(camPitch), sp = std::sin(camPitch);
+	float cy = std::cos(camYaw),   sy = std::sin(camYaw);
+	float cr = std::cos(camRoll),  sr = std::sin(camRoll);
+
+	// Матрица View (комбинация вращения и перемещения камеры)
 	std::array<float, 16> view = {
-		1.0f, 0.0f, 0.0f, 0.0f,
-		0.0f, 1.0f, 0.0f, 0.0f,
-		0.0f, 0.0f, 1.0f, 0.0f,
-		0.0f, 0.0f, -3.5f, 1.0f
+		cy * cr + sy * sp * sr,   cp * sr,   -sy * cr + cy * sp * sr,   0.0f,
+		-cy * sr + sy * sp * cr,  cp * cr,   sy * sr + cy * sp * cr,    0.0f,
+		sy * cp,                 -sp,        cy * cp,                   0.0f,
+		0.0f,                     0.0f,      0.0f,                      1.0f
 	};
+
+	float tx = -s_camPos[0];
+	float ty = -s_camPos[1];
+	float tz = -s_camPos[2];
+
+	view[12] = tx * view[0] + ty * view[4] + tz * view[8];
+	view[13] = tx * view[1] + ty * view[5] + tz * view[9];
+	view[14] = tx * view[2] + ty * view[6] + tz * view[10];
+	view[15] = 1.0f;
 
 	// Матрица Projection
 	float aspect = float(ctx.swapchain_extent.width) / float(ctx.swapchain_extent.height);
@@ -405,7 +590,7 @@ void render(const graphics::internal::FrameData& fd) {
 
 	if (s_usePerspective) {
 		// Перспективная проекция
-		float fovy = 45.0f * 3.14159265f / 180.0f;
+		float fovy = s_fov * 3.14159265f / 180.0f;
 		float f = 1.0f / std::tan(fovy * 0.5f);
 		float zNear = 0.1f, zFar = 100.0f;
 
@@ -451,7 +636,31 @@ void render(const graphics::internal::FrameData& fd) {
 	// Обновляем буфер перед записью команд
 	GlobalUniforms ubo{};
 	std::memcpy(ubo.mvp, mvp.data(), sizeof(mvp));
+	std::memcpy(ubo.model, model.data(), sizeof(model));
+    
+	std::memcpy(ubo.ambientLight, s_ambientLight, sizeof(s_ambientLight));
+	std::memcpy(ubo.lightColor, s_lightColor, sizeof(s_lightColor));
+	std::memcpy(ubo.lightDir, s_lightDir, sizeof(s_lightDir));
+	std::memcpy(ubo.cameraPos, s_camPos, sizeof(s_camPos));
+	std::memcpy(ubo.specularColor, s_specularColor, sizeof(s_specularColor));
+	ubo.shininess = s_shininess;
+	ubo.pad1 = 0.0f; ubo.pad2 = 0.0f; ubo.pad3 = 0.0f;
+
 	std::memcpy(s_uniformBufferMapped, &ubo, sizeof(ubo));
+	// === НОВОЕ: UBO для пола ===
+	// Пол не вращается: model = identity
+	std::array<float,16> floorModel = {
+		1,0,0,0,
+		0,1,0,0,
+		0,0,1,0,
+		0,0,0,1
+	};
+	auto floorMvp = multiplyMatrices(proj, multiplyMatrices(view, floorModel));
+
+	GlobalUniforms uboFloor = ubo; // копируем освещение/камеру
+	std::memcpy(uboFloor.mvp,   floorMvp.data(),  sizeof(floorMvp));
+	std::memcpy(uboFloor.model, floorModel.data(), sizeof(floorModel));
+	std::memcpy(s_uniformBufferMappedFloor, &uboFloor, sizeof(uboFloor));
 
 	// Запись буфера команд
 	VkCommandBufferBeginInfo beginInfo{};
@@ -496,9 +705,15 @@ void render(const graphics::internal::FrameData& fd) {
 	vkCmdBindIndexBuffer(fd.command_buffer, s_indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
 	// Привязываем Descriptor Set с обновленными матрицами
-	vkCmdBindDescriptorSets(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pipelineLayout, 0, 1, &s_descriptorSet, 0, nullptr);
+	// Куб
+	vkCmdBindDescriptorSets(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+	                        s_pipelineLayout, 0, 1, &s_descriptorSet, 0, nullptr);
+	vkCmdDrawIndexed(fd.command_buffer, s_cubeIndexCount, 1, 0, 0, 0);
 
-	vkCmdDrawIndexed(fd.command_buffer, s_indexCount, 1, 0, 0, 0);
+	// Пол
+	vkCmdBindDescriptorSets(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+	                        s_pipelineLayout, 0, 1, &s_descriptorSetFloor, 0, nullptr);
+	vkCmdDrawIndexed(fd.command_buffer, s_floorIndexCount, 1, s_floorIndexOffset, 0, 0);
 
 	vkCmdEndRenderPass(fd.command_buffer);
 
