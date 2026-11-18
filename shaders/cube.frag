@@ -2,7 +2,7 @@
 
 layout(location = 0) in vec3 fragPos;
 layout(location = 1) in vec3 fragNormal;
-layout(location = 2) in vec3 fragColor;
+layout(location = 2) in vec2 fragUV;
 
 layout(location = 0) out vec4 outColor;
 
@@ -18,21 +18,24 @@ layout(std140, set = 0, binding = 0) uniform GlobalUniforms {
     float pad1, pad2, pad3;
 } ubo;
 
+// Передаём текстуру
+layout(set = 0, binding = 1) uniform sampler2D albedo_texture;
+
 void main() {
+    // Берем альбедо из текстуры
+    vec3 Kd = texture(albedo_texture, fragUV).rgb; 
+
     vec3 n = normalize(fragNormal);
     vec3 l = normalize(-ubo.lightDir.xyz);
     vec3 v = normalize(ubo.cameraPos.xyz - fragPos);
     vec3 h = normalize(l + v);
 
-    vec3 Kd = fragColor;                // Альбедо (цвет материала)
-    vec3 Ks = ubo.specularColor.xyz;    // Цвет блика из ImGui
+    vec3 Ks = ubo.specularColor.xyz;    
 
     // Модель Блинн-Фонга
     vec3 ambient = ubo.ambientLight.xyz * Kd;
-
     float diff = max(dot(n, l), 0.0);
     vec3 diffuse = diff * ubo.lightColor.xyz * Kd;
-
     float spec = pow(max(dot(n, h), 0.0), ubo.shininess);
     vec3 specular = spec * ubo.lightColor.xyz * Ks;
 
